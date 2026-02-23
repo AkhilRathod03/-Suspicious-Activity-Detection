@@ -27,13 +27,34 @@ FRAME_DIR = "frames_st"
 
 @st.cache_resource
 def load_keras_model():
-    """Load the model directly using Keras to avoid ImageAI dependency issues."""
+    """Attempt multiple ways to load the H5 model."""
     try:
+        # Strategy 1: Standard load
         model = tf.keras.models.load_model(MODEL_PATH)
         return model
-    except Exception as e:
-        st.error(f"Error loading model: {e}")
-        return None
+    except Exception as e1:
+        st.warning(f"Strategy 1 failed: {e1}")
+        try:
+            # Strategy 2: Load without compilation
+            model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+            return model
+        except Exception as e2:
+            st.warning(f"Strategy 2 failed: {e2}")
+            try:
+                # Strategy 3: Load as weights into a ResNet50 architecture (Common for ImageAI)
+                # ResNet50 is the default for setModelTypeAsResNet in ImageAI
+                base_model = tf.keras.applications.ResNet50(weights=None, include_top=False, input_shape=(224, 224, 3))
+                x = base_model.output
+                x = tf.keras.layers.GlobalAveragePooling2D()(x)
+                # ImageAI usually adds a Dense layer and a Softmax/Sigmoid for custom objects
+                # Based on model_class.json, there are 2 classes.
+                predictions = tf.keras.layers.Dense(2, activation='softmax')(x)
+                model = tf.keras.models.Model(inputs=base_model.input, outputs=predictions)
+                model.load_weights(MODEL_PATH)
+                return model
+            except Exception as e3:
+                st.error(f"All loading strategies failed. Error 3: {e3}")
+                return None
 
 def preprocess_image(img_path):
     """Preprocess image for ResNet (Standard 224x224)."""
@@ -41,8 +62,8 @@ def preprocess_image(img_path):
     img = img.resize((224, 224))
     img_array = np.array(img)
     img_array = np.expand_dims(img_array, axis=0)
-    # ResNet normalization (ImageAI typically uses 1/255.0)
-    img_array = img_array.astype('float32') / 255.0
+    # ResNet normalization
+    img_array = tf.keras.applications.resnet50.preprocess_input(img_array)
     return img_array
 
 if uploaded_video is not None:
@@ -94,7 +115,6 @@ if uploaded_video is not None:
                 img_input = preprocess_image(img_path)
                 
                 prediction = model.predict(img_input, verbose=0)
-                # Keras returns an array of probabilities
                 class_idx = np.argmax(prediction[0])
                 confidence = float(prediction[0][class_idx]) * 100
                 label = labels[class_idx]
@@ -124,7 +144,7 @@ if uploaded_video is not None:
 
             st.table(df_results)
         else:
-            st.error("Could not load the model. Please check if model.h5 is correct.")
+            st.error("Could not load the model. The file might be a 'weights-only' file or saved in an incompatible format.")
 
 else:
     st.info("Please upload a video file to start detection.")
