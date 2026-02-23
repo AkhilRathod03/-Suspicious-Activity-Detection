@@ -2,7 +2,8 @@ import streamlit as st
 import cv2
 import os
 import shutil
-from imageai.Prediction.Custom import CustomImagePrediction
+import tensorflow as tf
+import numpy as np
 import pandas as pd
 from PIL import Image
 
@@ -24,13 +25,25 @@ MODEL_PATH = "model.h5"
 JSON_PATH = "model_class.json"
 FRAME_DIR = "frames_st"
 
-def load_model():
-    prediction = CustomImagePrediction()
-    prediction.setModelTypeAsResNet()
-    prediction.setModelPath(MODEL_PATH)
-    prediction.setJsonPath(JSON_PATH)
-    prediction.loadModel(num_objects=2)
-    return prediction
+@st.cache_resource
+def load_keras_model():
+    """Load the model directly using Keras to avoid ImageAI dependency issues."""
+    try:
+        model = tf.keras.models.load_model(MODEL_PATH)
+        return model
+    except Exception as e:
+        st.error(f"Error loading model: {e}")
+        return None
+
+def preprocess_image(img_path):
+    """Preprocess image for ResNet (Standard 224x224)."""
+    img = Image.open(img_path).convert('RGB')
+    img = img.resize((224, 224))
+    img_array = np.array(img)
+    img_array = np.expand_dims(img_array, axis=0)
+    # ResNet normalization (ImageAI typically uses 1/255.0)
+    img_array = img_array.astype('float32') / 255.0
+    return img_array
 
 if uploaded_video is not None:
     # Save video locally to process with OpenCV
@@ -63,50 +76,58 @@ if uploaded_video is not None:
 
         # 2. Activity Detection
         st.subheader("🔍 Analyzing Activity...")
-        prediction_obj = load_model()
+        model = load_keras_model()
         
-        results = []
-        suspicious_found = False
-        
-        image_files = [f for f in os.listdir(FRAME_DIR) if f.endswith(".jpg")]
-        image_files.sort(key=lambda x: int(x.replace("frame", "").replace(".jpg", "")))
+        if model:
+            results = []
+            suspicious_found = False
+            
+            image_files = [f for f in os.listdir(FRAME_DIR) if f.endswith(".jpg")]
+            image_files.sort(key=lambda x: int(x.replace("frame", "").replace(".jpg", "")))
 
-        # Prediction Loop
-        detection_progress = st.progress(0)
-        for i, img_file in enumerate(image_files):
-            img_path = os.path.join(FRAME_DIR, img_file)
-            predictions, probabilities = prediction_obj.predictImage(img_path, result_count=1)
+            # Classes based on model_class.json: 0=normal, 1=suspicious
+            labels = ["normal", "suspicious"]
+
+            detection_progress = st.progress(0)
+            for i, img_file in enumerate(image_files):
+                img_path = os.path.join(FRAME_DIR, img_file)
+                img_input = preprocess_image(img_path)
+                
+                prediction = model.predict(img_input, verbose=0)
+                # Keras returns an array of probabilities
+                class_idx = np.argmax(prediction[0])
+                confidence = float(prediction[0][class_idx]) * 100
+                label = labels[class_idx]
+                
+                if label == "suspicious" and confidence > 80:
+                    results.append({"Frame": img_file, "Status": label, "Confidence": f"{confidence:.2f}%", "Action": "⚠️ Alert!"})
+                    suspicious_found = True
+                else:
+                    results.append({"Frame": img_file, "Status": label, "Confidence": f"{confidence:.2f}%", "Action": "✅ Normal"})
+                
+                detection_progress.progress((i + 1) / len(image_files))
+
+            # 3. Display Results
+            df_results = pd.DataFrame(results)
             
-            label = predictions[0]
-            confidence = probabilities[0]
-            
-            if label == "suspicious" and confidence > 80:
-                results.append({"Frame": img_file, "Status": label, "Confidence": f"{confidence:.2f}%", "Action": "⚠️ Alert!"})
-                suspicious_found = True
+            if suspicious_found:
+                st.error("🚨 Suspicious Activity Detected in the footage!")
+                # Show the first few suspicious frames
+                suspicious_frames = df_results[df_results["Status"] == "suspicious"].head(5)
+                cols = st.columns(len(suspicious_frames))
+                for idx, row in enumerate(suspicious_frames.itertuples()):
+                    with cols[idx]:
+                        img = Image.open(os.path.join(FRAME_DIR, row.Frame))
+                        st.image(img, caption=f"{row.Frame} ({row.Confidence})")
             else:
-                results.append({"Frame": img_file, "Status": label, "Confidence": f"{confidence:.2f}%", "Action": "✅ Normal"})
-            
-            detection_progress.progress((i + 1) / len(image_files))
+                st.success("✅ No suspicious activity detected.")
 
-        # 3. Display Results
-        df_results = pd.DataFrame(results)
-        
-        if suspicious_found:
-            st.error("🚨 Suspicious Activity Detected in the footage!")
-            # Show the first few suspicious frames
-            suspicious_frames = df_results[df_results["Status"] == "suspicious"].head(5)
-            cols = st.columns(len(suspicious_frames))
-            for idx, row in enumerate(suspicious_frames.itertuples()):
-                with cols[idx]:
-                    img = Image.open(os.path.join(FRAME_DIR, row.Frame))
-                    st.image(img, caption=f"{row.Frame} ({row.Confidence})")
+            st.table(df_results)
         else:
-            st.success("✅ No suspicious activity detected.")
-
-        st.table(df_results)
+            st.error("Could not load the model. Please check if model.h5 is correct.")
 
 else:
     st.info("Please upload a video file to start detection.")
 
 st.markdown("---")
-st.caption("Powered by Streamlit, OpenCV, and ImageAI")
+st.caption("Powered by Streamlit, OpenCV, and TensorFlow")

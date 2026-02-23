@@ -1,8 +1,6 @@
 streamlit
 opencv-python-headless
-imageai==2.1.6
 tensorflow
-keras
 pandas
 pillow
 imutils
